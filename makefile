@@ -5,6 +5,7 @@
 #      mpi         : will use mpicc to compile
 #      mplite      : It will look for the MP_Lite library in $HOME/mplite
 #      tcp         : You start the receiver and transmitter manually
+#      mtcp        : Same as TCP, but uses the mTCP user-mode stack
 #      paragon     : Uses MPI on the Paragon
 #      pvm         : Old version doesn't use pvm_spawn
 #                    Use 'NPpvm -r' on receiver and 'NPpvm' on transmitter
@@ -82,6 +83,9 @@ clean:
 
 tcp: $(SRC)/tcp.c $(SRC)/netpipe.c $(SRC)/netpipe.h 
 	$(CC) $(CFLAGS) $(SRC)/netpipe.c $(SRC)/tcp.c -DTCP -o NPtcp -I$(SRC)
+
+mtcp: $(SRC)/mtcp.c $(SRC)/netpipe.c $(SRC)/netpipe.h 
+	$(CC) $(CFLAGS) $(SRC)/netpipe.c $(SRC)/mtcp.c -DTCP -o NPmtcp -I$(SRC) -lmtcp -lnuma -pthread -lps -lrt
 
 tcp6: $(SRC)/tcp.c $(SRC)/netpipe.c $(SRC)/netpipe.h 
 	$(CC) $(CFLAGS) $(SRC)/netpipe.c $(SRC)/tcp6.c -DTCP6 \

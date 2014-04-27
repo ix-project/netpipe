@@ -497,8 +497,8 @@ int main(int argc, char **argv)
    tlast = (When() - t0)/200;
 
    /* Sync up and Reset before freeing the buffers */
-
-   Sync(&args); 
+   
+   Sync(&args);  ///////
 
    Reset(&args);
    

@@ -13,12 +13,119 @@
 /*****************************************************************************/
 #include    "netpipe.h"
 
+#include <mtcp_api.h>
+#include <mtcp_epoll.h>
+
 #if defined (MPLITE)
 #include "mplite.h"
 #endif
 
 
+#define NEVENTS 10
+
 int doing_reset = 0;
+mctx_t mctx = NULL;
+int ep = -1;
+
+
+int mtcp_accept_helper(mctx_t mctx, int sockid, struct sockaddr *addr, socklen_t *addrlen)
+{
+    int nevents, i;
+    struct mtcp_epoll_event events[NEVENTS];
+    struct mtcp_epoll_event evctl;
+    
+    evctl.events = MTCP_EPOLLIN;
+    evctl.data.sockid = sockid;
+    if (mtcp_epoll_ctl(mctx, ep, MTCP_EPOLL_CTL_ADD, sockid, &evctl) < 0) {
+        perror("epoll_ctl");
+        exit(1);
+    }
+    
+    while (1) {
+        nevents = mtcp_epoll_wait(mctx, ep, events, NEVENTS, -1);
+        if (nevents < 0) {
+			if (errno != EINTR)
+				perror("mtcp_epoll_wait");
+			exit(1);
+		}
+        
+        for (i = 0; i < nevents; ++i) {
+            if (events[i].data.sockid == sockid) {
+                mtcp_epoll_ctl(mctx, ep, MTCP_EPOLL_CTL_DEL, sockid, NULL);                
+                return mtcp_accept(mctx, sockid, addr, addrlen);
+            } else {
+                printf("Socket error!\n");
+                exit(1);
+            }
+        }
+    }
+}
+
+int mtcp_read_helper(mctx_t mctx, int sockid, char *buf, int len)
+{
+    int nevents, i;
+    struct mtcp_epoll_event events[NEVENTS];
+    struct mtcp_epoll_event evctl;
+    
+    evctl.events = MTCP_EPOLLIN;
+    evctl.data.sockid = sockid;
+    if (mtcp_epoll_ctl(mctx, ep, MTCP_EPOLL_CTL_ADD, sockid, &evctl) < 0) {
+        perror("epoll_ctl");
+        exit(1);
+    }
+    
+    while (1) {
+        nevents = mtcp_epoll_wait(mctx, ep, events, NEVENTS, -1);
+        if (nevents < 0) {
+			if (errno != EINTR)
+				perror("mtcp_epoll_wait");
+			exit(1);
+		}
+        
+        for (i = 0; i < nevents; ++i) {
+            if (events[i].data.sockid == sockid) {
+                mtcp_epoll_ctl(mctx, ep, MTCP_EPOLL_CTL_DEL, sockid, NULL);                
+                return mtcp_read(mctx, sockid, buf, len);
+            } else {
+                printf("Socket error!\n");
+                exit(1);
+            }
+        }
+    }
+}
+
+int mtcp_write_helper(mctx_t mctx, int sockid, char *buf, int len)
+{
+    int nevents, i;
+    struct mtcp_epoll_event events[NEVENTS];
+    struct mtcp_epoll_event evctl;
+    
+    evctl.events = MTCP_EPOLLOUT;
+    evctl.data.sockid = sockid;
+    if (mtcp_epoll_ctl(mctx, ep, MTCP_EPOLL_CTL_ADD, sockid, &evctl) < 0) {
+        perror("epoll_ctl");
+        exit(1);
+    }
+    
+    while (1) {
+        nevents = mtcp_epoll_wait(mctx, ep, events, NEVENTS, -1);
+        if (nevents < 0) {
+			if (errno != EINTR)
+				perror("mtcp_epoll_wait");
+			exit(1);
+		}
+        
+        for (i = 0; i < nevents; ++i) {
+            if (events[i].data.sockid == sockid) {
+                mtcp_epoll_ctl(mctx, ep, MTCP_EPOLL_CTL_DEL, sockid, NULL);                
+                return mtcp_write(mctx, sockid, buf, len);
+            } else {
+                printf("Socket error!\n");
+                exit(1);
+            }
+        }
+    }
+}
 
 void Init(ArgStruct *p, int* pargc, char*** pargv)
 {
@@ -26,6 +133,7 @@ void Init(ArgStruct *p, int* pargc, char*** pargv)
    p->prot.sndbufsz = p->prot.rcvbufsz = 0;
    p->tr = 0;     /* The transmitter will be set using the -h host flag. */
    p->rcv = 1;
+   mtcp_init("NPmtcp.conf");
 }
 
 void Setup(ArgStruct *p)
@@ -53,53 +161,28 @@ void Setup(ArgStruct *p)
 
  bzero((char *) lsin1, sizeof(*lsin1));
  bzero((char *) lsin2, sizeof(*lsin2));
+ 
+ if (!mctx) {
+   mtcp_core_affinitize(0);
+   mctx = mtcp_create_context(0);
+   ep = mtcp_epoll_create(mctx, NEVENTS);
+ }
+ 
+ if (!mctx) {
+   printf("NetPIPE: can't create mTCP socket! errno=%d\n", errno);
+   exit(-4);
+ }
 
- if ( (sockfd = socket(socket_family, SOCK_STREAM, 0)) < 0){ 
+ if ( (sockfd = mtcp_socket(mctx, socket_family, MTCP_SOCK_STREAM, 0)) < 0){ 
    printf("NetPIPE: can't open stream socket! errno=%d\n", errno);
    exit(-4);
  }
+ 
+ mtcp_setsock_nonblock(mctx, sockfd);
 
  if(!(proto = getprotobyname("tcp"))){
    printf("NetPIPE: protocol 'tcp' unknown!\n");
    exit(555);
- }
-
-    /* Attempt to set TCP_NODELAY */
-
- if(setsockopt(sockfd, proto->p_proto, TCP_NODELAY, &one, sizeof(one)) < 0)
- {
-   printf("NetPIPE: setsockopt: TCP_NODELAY failed! errno=%d\n", errno);
-   exit(556);
- }
-
-   /* If requested, set the send and receive buffer sizes */
-
- if(p->prot.sndbufsz > 0)
- {
-     if(setsockopt(sockfd, SOL_SOCKET, SO_SNDBUF, &(p->prot.sndbufsz), 
-                                       sizeof(p->prot.sndbufsz)) < 0)
-     {
-          printf("NetPIPE: setsockopt: SO_SNDBUF failed! errno=%d\n", errno);
-          printf("You may have asked for a buffer larger than the system can handle\n");
-          exit(556);
-     }
-     if(setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &(p->prot.rcvbufsz), 
-                                       sizeof(p->prot.rcvbufsz)) < 0)
-     {
-          printf("NetPIPE: setsockopt: SO_RCVBUF failed! errno=%d\n", errno);
-          printf("You may have asked for a buffer larger than the system can handle\n");
-          exit(556);
-     }
- }
- getsockopt(sockfd, SOL_SOCKET, SO_SNDBUF,
-                 (char *) &send_size, (void *) &sizeofint);
- getsockopt(sockfd, SOL_SOCKET, SO_RCVBUF,
-                 (char *) &recv_size, (void *) &sizeofint);
- 
- if(!doing_reset) {
-   fprintf(stderr,"Send and receive buffers are %d and %d bytes\n",
-           send_size, recv_size);
-   fprintf(stderr, "(A bug in Linux doubles the requested buffer sizes)\n");
  }
 
  if( p->tr ) {                             /* Primary transmitter */
@@ -130,7 +213,7 @@ void Setup(ArgStruct *p)
    lsin1->sin_addr.s_addr = htonl(INADDR_ANY);
    lsin1->sin_port        = htons(p->port);
    
-   if (bind(sockfd, (struct sockaddr *) lsin1, sizeof(*lsin1)) < 0){
+   if (mtcp_bind(mctx, sockfd, (struct sockaddr *) lsin1, sizeof(*lsin1)) < 0){
      printf("NetPIPE: server: bind on local address failed! errno=%d", errno);
      exit(-6);
    }
@@ -149,10 +232,17 @@ readFully(int fd, void *obuf, int len)
   int bytesLeft = len;
   char *buf = (char *) obuf;
   int bytesRead = 0;
-
+  
   while (bytesLeft > 0 &&
-         (bytesRead = read(fd, (void *) buf, bytesLeft)) > 0)
+         (bytesRead = mtcp_read_helper(mctx, fd, (void *) buf, bytesLeft)) != 0)
     {
+      if (bytesRead < 0) {
+        if (errno == EAGAIN)
+          continue;
+        else
+          break;
+      }
+      
       bytesLeft -= bytesRead;
       buf += bytesRead;
     }
@@ -163,8 +253,14 @@ readFully(int fd, void *obuf, int len)
 void Sync(ArgStruct *p)
 {
     char s[] = "SyncMe", response[] = "      ";
+    int ret;
 
-    if (write(p->commfd, s, strlen(s)) < 0 ||           /* Write to nbor */
+    ret = mtcp_write_helper(mctx, p->commfd, s, strlen(s));
+    while (ret < 0 && errno == EAGAIN) {
+        ret = mtcp_write_helper(mctx, p->commfd, s, strlen(s));
+    }
+    
+    if (ret < 0 ||           /* Write to nbor */
         readFully(p->commfd, response, strlen(s)) < 0)  /* Read from nbor */
       {
         perror("NetPIPE: error writing or reading synchronization string");
@@ -194,12 +290,19 @@ void SendData(ArgStruct *p)
     bytesWritten = 0;
     q = p->s_ptr;
     while (bytesLeft > 0 &&
-           (bytesWritten = write(p->commfd, q, bytesLeft)) > 0)
+           (bytesWritten = mtcp_write_helper(mctx, p->commfd, q, bytesLeft)) != 0)
       {
+        if (bytesWritten < 0) {
+          if (errno == EAGAIN)
+            continue;
+          else
+            break;
+        }
+        
         bytesLeft -= bytesWritten;
         q += bytesWritten;
       }
-    if (bytesWritten == -1)
+    if (bytesWritten < 0)
       {
         printf("NetPIPE: write: error encountered, errno=%d\n", errno);
         exit(401);
@@ -216,8 +319,15 @@ void RecvData(ArgStruct *p)
     bytesRead = 0;
     q = p->r_ptr;
     while (bytesLeft > 0 &&
-           (bytesRead = read(p->commfd, q, bytesLeft)) > 0)
+           (bytesRead = mtcp_read_helper(mctx, p->commfd, q, bytesLeft)) != 0)
       {
+        if (bytesRead < 0) {
+          if (errno == EAGAIN)
+            continue;
+          else
+            break;
+        }
+        
         bytesLeft -= bytesRead;
         q += bytesRead;
       }
@@ -238,6 +348,7 @@ void RecvData(ArgStruct *p)
 void SendTime(ArgStruct *p, double *t)
 {
     uint32_t ltime, ntime;
+    int ret;
 
     /*
       Multiply the number of seconds by 1e8 to get time in 0.01 microseconds
@@ -247,7 +358,12 @@ void SendTime(ArgStruct *p, double *t)
 
     /* Send time in network order */
     ntime = htonl(ltime);
-    if (write(p->commfd, (char *)&ntime, sizeof(uint32_t)) < 0)
+    ret = mtcp_write_helper(mctx, p->commfd, (char *)&ntime, sizeof(uint32_t));
+    while (ret < 0 && errno == EAGAIN) {
+        ret = mtcp_write_helper(mctx, p->commfd, (char *)&ntime, sizeof(uint32_t));
+    }
+    
+    if (ret < 0)
       {
         printf("NetPIPE: write failed in SendTime: errno=%d\n", errno);
         exit(301);
@@ -281,11 +397,18 @@ void RecvTime(ArgStruct *p, double *t)
 void SendRepeat(ArgStruct *p, int rpt)
 {
   uint32_t lrpt, nrpt;
+  int ret;
 
   lrpt = rpt;
   /* Send repeat count as a long in network order */
   nrpt = htonl(lrpt);
-  if (write(p->commfd, (void *) &nrpt, sizeof(uint32_t)) < 0)
+  
+  ret = mtcp_write_helper(mctx, p->commfd, (void *) &nrpt, sizeof(uint32_t));
+  while (ret < 0 && errno == EAGAIN) {
+    ret = mtcp_write_helper(mctx, p->commfd, (void *) &nrpt, sizeof(uint32_t));
+  }
+  
+  if (ret < 0)
     {
       printf("NetPIPE: write failed in SendRepeat: errno=%d\n", errno);
       exit(304);
@@ -324,8 +447,8 @@ void establish(ArgStruct *p)
 
   if( p->tr ){
 
-    while( connect(p->commfd, (struct sockaddr *) &(p->prot.sin1),
-                   sizeof(p->prot.sin1)) < 0 ) {
+    while( mtcp_connect(mctx, p->commfd, (struct sockaddr *) &(p->prot.sin1),
+                   sizeof(p->prot.sin1)) < 0  && errno != EINPROGRESS) {
 
       /* If we are doing a reset and we get a connection refused from
        * the connect() call, assume that the other node has not yet
@@ -342,72 +465,46 @@ void establish(ArgStruct *p)
   } else if( p->rcv ) {
 
     /* SERVER */
-    listen(p->servicefd, 5);
-    p->commfd = accept(p->servicefd, (struct sockaddr *) &(p->prot.sin2), &clen);
-
+    mtcp_listen(mctx, p->servicefd, 5);
+    p->commfd = mtcp_accept_helper(mctx, p->servicefd, (struct sockaddr *) &(p->prot.sin2), &clen);
+    while (p->commfd < 0 && errno == EAGAIN) {
+      p->commfd = mtcp_accept_helper(mctx, p->servicefd, (struct sockaddr *) &(p->prot.sin2), &clen);
+    }
+    
     if(p->commfd < 0){
       printf("Server: Accept Failed! errno=%d\n",errno);
+      perror("accept");
       exit(-12);
     }
 
-    /*
-      Attempt to set TCP_NODELAY. TCP_NODELAY may or may not be propagated
-      to accepted sockets.
-     */
     if(!(proto = getprotobyname("tcp"))){
       printf("unknown protocol!\n");
       exit(555);
-    }
-
-    if(setsockopt(p->commfd, proto->p_proto, TCP_NODELAY,
-                  &one, sizeof(one)) < 0)
-    {
-      printf("setsockopt: TCP_NODELAY failed! errno=%d\n", errno);
-      exit(556);
-    }
-    
-    if (setsockopt(p->commfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(int))) {
-      printf("NetPIPE: server: unable to setsockopt -- errno %d\n", errno);
-      exit(557);
-    }
-
-    /* If requested, set the send and receive buffer sizes */
-    if(p->prot.sndbufsz > 0)
-    {
-/*      printf("Send and Receive Buffers on accepted socket set to %d bytes\n",*/
-/*           p->prot.sndbufsz);*/
-      if(setsockopt(p->commfd, SOL_SOCKET, SO_SNDBUF, &(p->prot.sndbufsz), 
-                                       sizeof(p->prot.sndbufsz)) < 0)
-      {
-        printf("setsockopt: SO_SNDBUF failed! errno=%d\n", errno);
-        exit(556);
-      }
-      if(setsockopt(p->commfd, SOL_SOCKET, SO_RCVBUF, &(p->prot.rcvbufsz), 
-                                       sizeof(p->prot.rcvbufsz)) < 0)
-      {
-        printf("setsockopt: SO_RCVBUF failed! errno=%d\n", errno);
-        exit(556);
-      }
     }
   }
 }
 
 void CleanUp2(ArgStruct *p)
 {
-   char *quit="QUIT";
+   char quit[5];
+   quit[0] = 'Q';
+   quit[1] = 'U';
+   quit[2] = 'I';
+   quit[3] = 'T';
+   quit[4] = '\0';
 
    if (p->tr) {
 
-      write(p->commfd,quit, 5);
-      read(p->commfd, quit, 5);
-      close(p->commfd);
+      mtcp_write_helper(mctx, p->commfd,quit, 5);
+      mtcp_read_helper(mctx, p->commfd, quit, 5);
+      mtcp_close(mctx, p->commfd);
 
    } else if( p->rcv ) {
 
-      read(p->commfd,quit, 5);
-      write(p->commfd,quit,5);
-      close(p->commfd);
-      close(p->servicefd);
+      mtcp_read_helper(mctx, p->commfd,quit, 5);
+      mtcp_write_helper(mctx, p->commfd,quit,5);
+      mtcp_close(mctx, p->commfd);
+      mtcp_close(mctx, p->servicefd);
 
    }
 }
@@ -415,12 +512,6 @@ void CleanUp2(ArgStruct *p)
 
 void CleanUp(ArgStruct *p)
 {
-  if (p->tr) {
-    close(p->commfd);
-  } else if (p->rcv) {
-    close(p->commfd);
-    close(p->servicefd);
-  }    
 }
 
 
